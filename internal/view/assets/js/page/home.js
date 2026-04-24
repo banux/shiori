@@ -34,7 +34,7 @@ var template = `
         </a>
     </div>
     <p class="empty-message" v-if="!loading && listIsEmpty">No saved bookmarks yet :(</p>
-    <div id="bookmarks-grid" ref="bookmarksGrid" :class="{list: appOptions.listMode}">
+    <div id="bookmarks-grid" ref="bookmarksGrid" :class="{list: appOptions.ListMode}">
         <pagination-box v-if="maxPage > 1"
             :page="page"
             :maxPage="maxPage"
@@ -48,6 +48,7 @@ var template = `
             :excerpt="book.excerpt"
             :public="book.public"
             :imageURL="book.imageURL"
+            :modifiedAt="book.modifiedAt"
             :hasContent="book.hasContent"
             :hasArchive="book.hasArchive"
             :hasEbook="book.hasEbook"
@@ -55,10 +56,10 @@ var template = `
             :index="index"
             :key="book.id"
             :editMode="editMode"
-            :showId="appOptions.showId"
-            :listMode="appOptions.listMode"
-            :hideThumbnail="appOptions.hideThumbnail"
-            :hideExcerpt="appOptions.hideExcerpt"
+            :ShowId="appOptions.ShowId"
+            :ListMode="appOptions.ListMode"
+            :HideThumbnail="appOptions.HideThumbnail"
+            :HideExcerpt="appOptions.HideExcerpt"
             :selected="isSelected(book.id)"
             :menuVisible="activeAccount.owner"
             @select="toggleSelection"
@@ -80,16 +81,20 @@ var template = `
         <a @click="filterTag('*')">(all tagged)</a>
         <a @click="filterTag('*', true)">(all untagged)</a>
         <a v-for="tag in tags" @click="dialogTagClicked($event, tag)">
-            #{{tag.name}}<span>{{tag.nBookmarks}}</span>
+            #{{tag.name}}<span>{{tag.bookmark_count}}</span>
         </a>
     </custom-dialog>
     <custom-dialog v-bind="dialog"/>
-</div>`
+</div>`;
 
 import paginationBox from "../component/pagination.js";
 import bookmarkItem from "../component/bookmark.js";
 import customDialog from "../component/dialog.js";
 import basePage from "./base.js";
+import EventBus from "../component/eventBus.js";
+import { apiRequest } from "../utils/api.js";
+
+Vue.prototype.$bus = EventBus;
 
 export default {
 	template: template,
@@ -97,7 +102,7 @@ export default {
 	components: {
 		bookmarkItem,
 		paginationBox,
-		customDialog
+		customDialog,
 	},
 	data() {
 		return {
@@ -114,9 +119,9 @@ export default {
 			dialogTags: {
 				visible: false,
 				editMode: false,
-				title: 'Existing Tags',
-				mainText: 'OK',
-				secondText: 'Rename Tags',
+				title: "Existing Tags",
+				mainText: "OK",
+				secondText: "Rename Tags",
 				mainClick: () => {
 					if (this.dialogTags.editMode) {
 						this.dialogTags.editMode = false;
@@ -130,14 +135,14 @@ export default {
 				escPressed: () => {
 					this.dialogTags.visible = false;
 					this.dialogTags.editMode = false;
-				}
+				},
 			},
-		}
+		};
 	},
 	computed: {
 		listIsEmpty() {
 			return this.bookmarks.length <= 0;
-		}
+		},
 	},
 	watch: {
 		"dialogTags.editMode"(editMode) {
@@ -150,21 +155,25 @@ export default {
 				this.dialogTags.mainText = "OK";
 				this.dialogTags.secondText = "Rename Tags";
 			}
-		}
+		},
 	},
 	methods: {
+		clearHomePage() {
+			this.search = "";
+			this.searchBookmarks();
+		},
 		reloadData() {
 			if (this.loading) return;
 			this.page = 1;
 			this.search = "";
 			this.loadData(true, true);
 		},
-		loadData(saveState, fetchTags) {
+		async loadData(saveState, fetchTags) {
 			if (this.loading) return;
 
 			// Set default args
-			saveState = (typeof saveState === "boolean") ? saveState : true;
-			fetchTags = (typeof fetchTags === "boolean") ? fetchTags : false;
+			saveState = typeof saveState === "boolean" ? saveState : true;
+			fetchTags = typeof fetchTags === "boolean" ? fetchTags : false;
 
 			// Parse search query
 			var keyword = this.search,
@@ -177,23 +186,23 @@ export default {
 				rxResult;
 
 			// Get excluded tag first, while also removing it from keyword
-			while (rxResult = rxExcludeTagA.exec(keyword)) {
+			while ((rxResult = rxExcludeTagA.exec(keyword))) {
 				keyword = keyword.replace(rxResult[0], "");
 				excludedTags.push(rxResult[2]);
 			}
 
-			while (rxResult = rxExcludeTagB.exec(keyword)) {
+			while ((rxResult = rxExcludeTagB.exec(keyword))) {
 				keyword = keyword.replace(rxResult[0], "");
 				excludedTags.push(rxResult[2]);
 			}
 
 			// Get included tags
-			while (rxResult = rxIncludeTagA.exec(keyword)) {
+			while ((rxResult = rxIncludeTagA.exec(keyword))) {
 				keyword = keyword.replace(rxResult[0], "");
 				tags.push(rxResult[2]);
 			}
 
-			while (rxResult = rxIncludeTagB.exec(keyword)) {
+			while ((rxResult = rxIncludeTagB.exec(keyword))) {
 				keyword = keyword.replace(rxResult[0], "");
 				tags.push(rxResult[2]);
 			}
@@ -207,66 +216,52 @@ export default {
 				keyword: keyword,
 				tags: tags.join(","),
 				exclude: excludedTags.join(","),
-				page: this.page
+				page: this.page,
 			});
 
 			// Fetch data from API
 			var skipFetchTags = Error("skip fetching tags");
 
 			this.loading = true;
-			fetch(url, {headers: {'Content-Type': 'application/json'}})
-				.then(response => {
-					if (!response.ok) throw response;
-					return response.json();
-				})
-				.then(json => {
-					// Set data
-					this.page = json.page;
-					this.maxPage = json.maxPage;
-					this.bookmarks = json.bookmarks;
+			try {
+				const json = await apiRequest(url);
 
-					// Save state and change URL if needed
-					if (saveState) {
-						var history = {
-							activePage: "page-home",
-							search: this.search,
-							page: this.page
-						};
+				// Set data
+				this.page = json.page;
+				this.maxPage = json.maxPage;
+				this.bookmarks = json.bookmarks;
 
-						var url = new Url(document.baseURI);
-						url.hash = "home";
-						url.clearQuery();
-						if (this.page > 1) url.query.page = this.page;
-						if (this.search !== "") url.query.search = this.search;
+				// Save state and change URL if needed
+				if (saveState) {
+					var history = {
+						activePage: "page-home",
+						search: this.search,
+						page: this.page,
+					};
 
-						window.history.pushState(history, "page-home", url);
-					}
+					var url = new Url(document.baseURI);
+					url.hash = "home";
+					url.query = new URLSearchParams({
+						page: this.page,
+						search: this.search,
+					}).toString();
 
-					// Fetch tags if requested
-					if (fetchTags) {
-						return fetch(new URL("api/tags", document.baseURI), {headers: {'Content-Type': 'application/json'}});
-					} else {
-						this.loading = false;
-						throw skipFetchTags;
-					}
-				})
-				.then(response => {
-					if (!response.ok) throw response;
-					return response.json();
-				})
-				.then(json => {
-					this.tags = json;
-					this.loading = false;
-				})
-				.catch(err => {
-					this.loading = false;
+					window.history.pushState(history, null, url.toString());
+				}
 
-					if (err !== skipFetchTags) {
-						this.getErrorMessage(err).then(msg => {
-							this.showErrorDialog(msg);
-						})
-					}
-				});
+				// Fetch tags if needed
+				if (!fetchTags) throw skipFetchTags;
+
+				const tagsUrl = new URL("api/tags", document.baseURI);
+				const tagsJson = await apiRequest(tagsUrl);
+				this.tags = tagsJson;
+			} catch (err) {
+				if (err !== skipFetchTags) {
+					this.showErrorDialog(err.message);
+				}
+			} finally {
+				this.loading = false;
+			}
 		},
 		searchBookmarks() {
 			this.page = 1;
@@ -282,12 +277,12 @@ export default {
 			this.editMode = !this.editMode;
 		},
 		toggleSelection(item) {
-			var idx = this.selection.findIndex(el => el.id === item.id);
+			var idx = this.selection.findIndex((el) => el.id === item.id);
 			if (idx === -1) this.selection.push(item);
 			else this.selection.splice(idx, 1);
 		},
 		isSelected(bookId) {
-			return this.selection.findIndex(el => el.id === bookId) > -1;
+			return this.selection.findIndex((el) => el.id === bookId) > -1;
 		},
 		dialogTagClicked(event, tag) {
 			if (!this.dialogTags.editMode) {
@@ -302,7 +297,7 @@ export default {
 		},
 		filterTag(tagName, excludeMode) {
 			// Set default parameter
-			excludeMode = (typeof excludeMode === "boolean") ? excludeMode : false;
+			excludeMode = typeof excludeMode === "boolean" ? excludeMode : false;
 
 			if (this.dialogTags.editMode) {
 				return;
@@ -316,7 +311,9 @@ export default {
 			}
 
 			var rxSpace = /\s+/g,
-				includeTag = rxSpace.test(tagName) ? `tag:"${tagName}"` : `tag:${tagName}`,
+				includeTag = rxSpace.test(tagName)
+					? `tag:"${tagName}"`
+					: `tag:${tagName}`,
 				excludeTag = "-" + includeTag,
 				rxIncludeTag = new RegExp(`(^|\\s)${includeTag}`, "ig"),
 				rxExcludeTag = new RegExp(`(^|\\s)${excludeTag}`, "ig"),
@@ -353,39 +350,59 @@ export default {
 			this.page = 1;
 			this.loadData();
 		},
-		showDialogAdd() {
+		showDialogAdd(values) {
+			if (values === undefined) {
+				values = {};
+			}
+
 			this.showDialog({
 				title: "New Bookmark",
 				content: "Create a new bookmark",
-				fields: [{
-					name: "url",
-					label: "Url, start with http://...",
-				}, {
-					name: "title",
-					label: "Custom title (optional)"
-				}, {
-					name: "excerpt",
-					label: "Custom excerpt (optional)",
-					type: "area"
-				}, {
-					name: "tags",
-					label: "Comma separated tags (optional)",
-					separator: ",",
-					dictionary: this.tags.map(tag => tag.name)
-				}, {
-					name: "createArchive",
-					label: "Create archive",
-					type: "check",
-					value: this.appOptions.useArchive,
-				}, {
-					name: "makePublic",
-					label: "Make archive publicly available",
-					type: "check",
-					value: this.appOptions.makePublic,
-				}],
+				fields: [
+					{
+						name: "url",
+						label: "Url, start with http://...",
+						value: values.url || "",
+					},
+					{
+						name: "title",
+						label: "Custom title (optional)",
+						value: values.title || "",
+					},
+					{
+						name: "excerpt",
+						label: "Custom excerpt (optional)",
+						type: "area",
+						value: values.excerpt || "",
+					},
+					{
+						name: "tags",
+						label: "Comma separated tags (optional)",
+						separator: ",",
+						dictionary: this.tags.map((tag) => tag.name),
+					},
+					{
+						name: "create_archive",
+						label: "Create archive",
+						type: "check",
+						value: this.appOptions.UseArchive,
+					},
+					{
+						name: "create_ebook",
+						label: "Create Ebook",
+						type: "check",
+						value: this.appOptions.CreateEbook,
+					},
+					{
+						name: "makePublic",
+						label: "Make bookmark publicly available",
+						type: "check",
+						value: this.appOptions.MakePublic,
+					},
+				],
 				mainText: "OK",
 				secondText: "Cancel",
-				mainClick: (data) => {
+				mainClick: async (data) => {
 					// Make sure URL is not empty
 					if (data.url.trim() === "") {
 						this.showErrorDialog("URL must not empty");
@@ -397,89 +414,93 @@ export default {
 						.toLowerCase()
 						.replace(/\s+/g, " ")
 						.split(/\s*,\s*/g)
-						.filter(tag => tag.trim() !== "")
-						.map(tag => {
-							return {
-								name: tag.trim()
-							};
-						});
+						.filter((tag) => tag.trim() !== "")
+						.map((tag) => ({
+							name: tag.trim(),
+						}));
 
 					// Send data
-					var data = {
+					var requestData = {
 						url: data.url.trim(),
 						title: data.title.trim(),
 						excerpt: data.excerpt.trim(),
 						public: data.makePublic ? 1 : 0,
 						tags: tags,
-						createArchive: data.createArchive,
+						create_archive: data.create_archive,
+						create_ebook: data.create_ebook,
 					};
 
 					this.dialog.loading = true;
-					fetch(new URL("api/bookmarks", document.baseURI), {
-						method: "post",
-						body: JSON.stringify(data),
-						headers: { "Content-Type": "application/json" }
-					}).then(response => {
-						if (!response.ok) throw response;
-						return response.json();
-					}).then(json => {
+					try {
+						const json = await apiRequest(
+							new URL("api/bookmarks", document.baseURI),
+							{
+								method: "post",
+								body: JSON.stringify(requestData),
+							},
+						);
+
 						this.dialog.loading = false;
 						this.dialog.visible = false;
 						this.bookmarks.splice(0, 0, json);
-					}).catch(err => {
+					} catch (err) {
 						this.dialog.loading = false;
-						this.getErrorMessage(err).then(msg => {
-							this.showErrorDialog(msg);
-						})
-					});
-				}
+						this.showErrorDialog(err.message);
+					}
+				},
 			});
 		},
 		showDialogEdit(item) {
 			// Check the item
 			if (typeof item !== "object") return;
 
-			var id = (typeof item.id === "number") ? item.id : 0,
-				index = (typeof item.index === "number") ? item.index : -1;
+			var id = typeof item.id === "number" ? item.id : 0,
+				index = typeof item.index === "number" ? item.index : -1;
 
 			if (id < 1 || index < 0) return;
 
 			// Get the existing bookmark value
 			var book = JSON.parse(JSON.stringify(this.bookmarks[index])),
-				strTags = book.tags.map(tag => tag.name).join(", ");
+				strTags = book.tags.map((tag) => tag.name).join(", ");
 
 			this.showDialog({
 				title: "Edit Bookmark",
 				content: "Edit the bookmark's data",
 				showLabel: true,
-				fields: [{
-					name: "url",
-					label: "Url",
-					value: book.url,
-				}, {
-					name: "title",
-					label: "Title",
-					value: book.title,
-				}, {
-					name: "excerpt",
-					label: "Excerpt",
-					type: "area",
-					value: book.excerpt,
-				}, {
-					name: "tags",
-					label: "Tags",
-					value: strTags,
-					separator: ",",
-					dictionary: this.tags.map(tag => tag.name)
-				}, {
-					name: "makePublic",
-					label: "Make archive publicly available",
-					type: "check",
-					value: book.public >= 1,
-				}],
+				fields: [
+					{
+						name: "url",
+						label: "Url",
+						value: book.url,
+					},
+					{
+						name: "title",
+						label: "Title",
+						value: book.title,
+					},
+					{
+						name: "excerpt",
+						label: "Excerpt",
+						type: "area",
+						value: book.excerpt,
+					},
+					{
+						name: "tags",
+						label: "Tags",
+						value: strTags,
+						separator: ",",
+						dictionary: this.tags.map((tag) => tag.name),
+					},
+					{
+						name: "makePublic",
+						label: "Make bookmark publicly available",
+						type: "check",
+						value: book.public >= 1,
+					},
+				],
 				mainText: "OK",
 				secondText: "Cancel",
-				mainClick: (data) => {
+				mainClick: async (data) => {
 					// Validate input
 					if (data.title.trim() === "") return;
 
@@ -488,12 +509,10 @@ export default {
 						.toLowerCase()
 						.replace(/\s+/g, " ")
 						.split(/\s*,\s*/g)
-						.filter(tag => tag.trim() !== "")
-						.map(tag => {
-							return {
-								name: tag.trim()
-							};
-						});
+						.filter((tag) => tag.trim() !== "")
+						.map((tag) => ({
+							name: tag.trim(),
+						}));
 
 					// Set new data
 					book.url = data.url.trim();
@@ -504,24 +523,23 @@ export default {
 
 					// Send data
 					this.dialog.loading = true;
-					fetch(new URL("api/bookmarks", document.baseURI), {
-						method: "put",
-						body: JSON.stringify(book),
-						headers: { "Content-Type": "application/json" }
-					}).then(response => {
-						if (!response.ok) throw response;
-						return response.json();
-					}).then(json => {
+					try {
+						const json = await apiRequest(
+							new URL("api/bookmarks", document.baseURI),
+							{
+								method: "put",
+								body: JSON.stringify(book),
+							},
+						);
+
 						this.dialog.loading = false;
 						this.dialog.visible = false;
 						this.bookmarks.splice(index, 1, json);
-					}).catch(err => {
+					} catch (err) {
 						this.dialog.loading = false;
-						this.getErrorMessage(err).then(msg => {
-							this.showErrorDialog(msg);
-						})
-					});
-				}
+						this.showErrorDialog(err.message);
+					}
+				},
 			});
 		},
 		showDialogDelete(items) {
@@ -529,9 +547,9 @@ export default {
 			if (typeof items !== "object") return;
 			if (!Array.isArray(items)) items = [items];
 
-			items = items.filter(item => {
-				var id = (typeof item.id === "number") ? item.id : 0,
-					index = (typeof item.index === "number") ? item.index : -1;
+			items = items.filter((item) => {
+				var id = typeof item.id === "number" ? item.id : 0,
+					index = typeof item.index === "number" ? item.index : -1;
 
 				return id > 0 && index > -1;
 			});
@@ -539,12 +557,13 @@ export default {
 			if (items.length === 0) return;
 
 			// Split ids and indices
-			var ids = items.map(item => item.id),
-				indices = items.map(item => item.index).sort((a, b) => b - a);
+			var ids = items.map((item) => item.id),
+				indices = items.map((item) => item.index).sort((a, b) => b - a);
 
 			// Create title and content
 			var title = "Delete Bookmarks",
-				content = "Delete the selected bookmarks ? This action is irreversible.";
+				content =
+					"Delete the selected bookmarks ? This action is irreversible.";
 
 			if (items.length === 1) {
 				title = "Delete Bookmark";
@@ -557,100 +576,108 @@ export default {
 				content: content,
 				mainText: "Yes",
 				secondText: "No",
-				mainClick: () => {
+				mainClick: async () => {
 					this.dialog.loading = true;
-					fetch(new URL("api/bookmarks", document.baseURI), {
-						method: "delete",
-						body: JSON.stringify(ids),
-						headers: { "Content-Type": "application/json" },
-					}).then(response => {
-						if (!response.ok) throw response;
-						return response;
-					}).then(() => {
+					try {
+						await apiRequest(new URL("api/bookmarks", document.baseURI), {
+							method: "delete",
+							body: JSON.stringify(ids),
+						});
+
 						this.selection = [];
 						this.editMode = false;
 						this.dialog.loading = false;
 						this.dialog.visible = false;
-						indices.forEach(index => this.bookmarks.splice(index, 1))
+						indices.forEach((index) => this.bookmarks.splice(index, 1));
 
 						if (this.bookmarks.length < 20) {
 							this.loadData(false);
 						}
-					}).catch(err => {
+					} catch (err) {
 						this.selection = [];
 						this.editMode = false;
 						this.dialog.loading = false;
-
-						this.getErrorMessage(err).then(msg => {
-							this.showErrorDialog(msg);
-						})
-					});
-				}
+						this.showErrorDialog(err.message);
+					}
+				},
 			});
 		},
-        ebookGenerate(items) {
-            // Check and filter items
-            if (typeof items !== "object") return;
-            if (!Array.isArray(items)) items = [items];
+		ebookGenerate(items) {
+			// Check and filter items
+			if (typeof items !== "object") return;
+			if (!Array.isArray(items)) items = [items];
 
-            items = items.filter(item => {
-                var id = (typeof item.id === "number") ? item.id : 0,
-                    index = (typeof item.index === "number") ? item.index : -1;
+			items = items.filter((item) => {
+				var id = typeof item.id === "number" ? item.id : 0,
+					index = typeof item.index === "number" ? item.index : -1;
 
-                return id > 0 && index > -1;
-            });
+				return id > 0 && index > -1;
+			});
 
-            if (items.length === 0) return;
+			if (items.length === 0) return;
 
-            // define variable and send request
-            var ids = items.map(item => item.id);
-            var data = {
-                ids: ids,
-            };
-            this.loading = true;
-            fetch(new URL("api/ebook", document.baseURI), {
-                method: "put",
-                body: JSON.stringify(data),
-                headers: { "Content-Type": "application/json" },
-            }).then(response => {
-                if (!response.ok) throw response;
-                return response.json();
-            }).then(json => {
-                this.selection = [];
-                this.editMode = false;
-                json.forEach(book => {
-                    // download ebooks
-                    const id = book.id;
-                    if (book.hasEbook){
-                    const ebook_url = new URL(`bookmark/${id}/ebook`, document.baseURI);
-                    const downloadLink = document.createElement("a");
-                    downloadLink.href = ebook_url.toString();
-                    downloadLink.download = `${book.title}.epub`;
-                    downloadLink.click();
-                    }
+			// define variable and send request
+			var ids = items.map((item) => item.id);
+			var data = {
+				ids: ids,
+				create_archive: false,
+				keep_metadata: true,
+				create_ebook: true,
+				skip_exist: true,
+			};
+			this.loading = true;
+			fetch(new URL("api/v1/bookmarks/cache", document.baseURI), {
+				method: "put",
+				body: JSON.stringify(data),
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: "Bearer " + localStorage.getItem("shiori-token"),
+				},
+			})
+				.then((response) => {
+					if (!response.ok) throw response;
+					return response.json();
+				})
+				.then((json) => {
+					this.selection = [];
+					this.editMode = false;
+					json.forEach((book) => {
+						// download ebooks
+						const id = book.id;
+						if (book.hasEbook) {
+							const ebook_url = new URL(
+								`bookmark/${id}/ebook`,
+								document.baseURI,
+							);
+							const downloadLink = document.createElement("a");
+							downloadLink.href = ebook_url.toString();
+							downloadLink.download = `${book.title}.epub`;
+							downloadLink.click();
+						}
 
-                    var item = items.find(el => el.id === book.id);
-					this.bookmarks.splice(item.index, 1, book);
-                });
-            }).catch(err => {
-                this.selection = [];
-                this.editMode = false;
-                this.getErrorMessage(err).then(msg => {
-                    this.showErrorDialog(msg);
-                })
-            })
-                .finally(() => {
-                    this.loading = false;
-                });
-        },
+						var item = items.find((el) => el.id === book.id);
+						this.bookmarks.splice(item.index, 1, book);
+					});
+				})
+				.catch((err) => {
+					this.selection = [];
+					this.editMode = false;
+					this.getErrorMessage(err).then((msg) => {
+						this.showErrorDialog(msg);
+					});
+				})
+				.finally(() => {
+					this.loading = false;
+				});
+		},
 		showDialogUpdateCache(items) {
 			// Check and filter items
 			if (typeof items !== "object") return;
 			if (!Array.isArray(items)) items = [items];
 
-			items = items.filter(item => {
-				var id = (typeof item.id === "number") ? item.id : 0,
-					index = (typeof item.index === "number") ? item.index : -1;
+			items = items.filter((item) => {
+				var id = typeof item.id === "number" ? item.id : 0,
+					index = typeof item.index === "number" ? item.index : -1;
 
 				return id > 0 && index > -1;
 			});
@@ -658,65 +685,94 @@ export default {
 			if (items.length === 0) return;
 
 			// Show dialog
-			var ids = items.map(item => item.id);
+			var ids = items.map((item) => item.id);
 
 			this.showDialog({
 				title: "Update Cache",
-				content: "Update cache for selected bookmarks ? This action is irreversible.",
-				fields: [{
-					name: "keepMetadata",
-					label: "Keep the old title and excerpt",
-					type: "check",
-					value: this.appOptions.keepMetadata,
-				}, {
-					name: "createArchive",
-					label: "Update archive as well",
-					type: "check",
-					value: this.appOptions.useArchive,
-				}, {
-					name: "createEbook",
-					label: "Update Ebook as well",
-					type: "check",
-					value: this.appOptions.createEbook,
-                }],
+				content:
+					"Update cache for selected bookmarks ? This action is irreversible.",
+				fields: [
+					{
+						name: "keep_metadata",
+						label: "Keep the old title and excerpt",
+						type: "check",
+						value: this.appOptions.KeepMetadata,
+					},
+					{
+						name: "create_archive",
+						label: "Update archive as well",
+						type: "check",
+						value: this.appOptions.UseArchive,
+					},
+					{
+						name: "create_ebook",
+						label: "Update Ebook as well",
+						type: "check",
+						value: this.appOptions.CreateEbook,
+					},
+				],
 				mainText: "Yes",
 				secondText: "No",
-				mainClick: (data) => {
-					var data = {
+				mainClick: async (data) => {
+					var requestData = {
 						ids: ids,
-						createArchive: data.createArchive,
-						keepMetadata: data.keepMetadata,
-                        createEbook: data.createEbook,
+						create_archive: data.create_archive,
+						keep_metadata: data.keep_metadata,
+						create_ebook: data.create_ebook,
+						skip_exist: false,
 					};
 
 					this.dialog.loading = true;
-					fetch(new URL("api/cache", document.baseURI), {
-						method: "put",
-						body: JSON.stringify(data),
-						headers: { "Content-Type": "application/json" },
-					}).then(response => {
-						if (!response.ok) throw response;
-						return response.json();
-					}).then(json => {
+					try {
+						const json = await apiRequest(
+							new URL("api/v1/bookmarks/cache", document.baseURI),
+							{
+								method: "put",
+								body: JSON.stringify(requestData),
+							},
+						);
+
 						this.selection = [];
 						this.editMode = false;
 						this.dialog.loading = false;
 						this.dialog.visible = false;
 
-						json.forEach(book => {
-							var item = items.find(el => el.id === book.id);
+						let faildedUpdateArchives = [];
+						let faildedCreateEbook = [];
+						json.forEach((book) => {
+							var item = items.find((el) => el.id === book.id);
 							this.bookmarks.splice(item.index, 1, book);
+
+							if (data.create_archive && !book.hasArchive) {
+								faildedUpdateArchives.push(book.id);
+								console.error("can't update archive for bookmark id", book.id);
+							}
+							if (data.create_ebook && !book.hasEbook) {
+								faildedCreateEbook.push(book.id);
+								console.error("can't update ebook for bookmark id:", book.id);
+							}
 						});
-					}).catch(err => {
+
+						if (
+							faildedCreateEbook.length > 0 ||
+							faildedUpdateArchives.length > 0
+						) {
+							this.showDialog({
+								title: `Bookmarks Id that Update Action Faild`,
+								content: `Not all bookmarks could have their contents updated, but no files were overwritten.`,
+								mainText: "OK",
+								mainClick: () => {
+									this.dialog.visible = false;
+								},
+							});
+						}
+					} catch (err) {
 						this.selection = [];
 						this.editMode = false;
 						this.dialog.loading = false;
-
-						this.getErrorMessage(err).then(msg => {
-							this.showErrorDialog(msg);
-						})
-					});
-				}
+						this.showErrorDialog(err.message);
+					}
+				},
 			});
 		},
 		showDialogAddTags(items) {
@@ -724,9 +780,9 @@ export default {
 			if (typeof items !== "object") return;
 			if (!Array.isArray(items)) items = [items];
 
-			items = items.filter(item => {
-				var id = (typeof item.id === "number") ? item.id : 0,
-					index = (typeof item.index === "number") ? item.index : -1;
+			items = items.filter((item) => {
+				var id = typeof item.id === "number" ? item.id : 0,
+					index = typeof item.index === "number" ? item.index : -1;
 
 				return id > 0 && index > -1;
 			});
@@ -737,80 +793,82 @@ export default {
 			this.showDialog({
 				title: "Add New Tags",
 				content: "Add new tags to selected bookmarks",
-				fields: [{
-					name: "tags",
-					label: "Comma separated tags",
-					value: "",
-					separator: ",",
-					dictionary: this.tags.map(tag => tag.name)
-				}],
-				mainText: 'OK',
-				secondText: 'Cancel',
-				mainClick: (data) => {
+				fields: [
+					{
+						name: "tags",
+						label: "Comma separated tags",
+						value: "",
+						separator: ",",
+						dictionary: this.tags.map((tag) => tag.name),
+					},
+				],
+				mainText: "OK",
+				secondText: "Cancel",
+				mainClick: async (data) => {
 					// Validate input
 					var tags = data.tags
 						.toLowerCase()
-						.replace(/\s+/g, ' ')
+						.replace(/\s+/g, " ")
 						.split(/\s*,\s*/g)
-						.filter(tag => tag.trim() !== '')
-						.map(tag => {
-							return {
-								name: tag.trim()
-							};
-						});
+						.filter((tag) => tag.trim() !== "")
+						.map((tag) => ({
+							name: tag.trim(),
+						}));
 
 					if (tags.length === 0) return;
 
 					// Send data
 					var request = {
-						ids: items.map(item => item.id),
-						tags: tags
-					}
+						ids: items.map((item) => item.id),
+						tags: tags,
+					};
 
 					this.dialog.loading = true;
-					fetch(new URL("api/bookmarks/tags", document.baseURI), {
-						method: "put",
-						body: JSON.stringify(request),
-						headers: { "Content-Type": "application/json" },
-					}).then(response => {
-						if (!response.ok) throw response;
-						return response.json();
-					}).then(json => {
+					try {
+						const json = await apiRequest(
+							new URL("api/v1/bookmarks/tags", document.baseURI),
+							{
+								method: "put",
+								body: JSON.stringify(request),
+							},
+						);
+
 						this.selection = [];
 						this.editMode = false;
 						this.dialog.loading = false;
 						this.dialog.visible = false;
 
-						json.forEach(book => {
-							var item = items.find(el => el.id === book.id);
+						json.forEach((book) => {
+							var item = items.find((el) => el.id === book.id);
 							this.bookmarks.splice(item.index, 1, book);
 						});
-					}).catch(err => {
+					} catch (err) {
 						this.selection = [];
 						this.editMode = false;
 						this.dialog.loading = false;
-
-						this.getErrorMessage(err).then(msg => {
-							this.showErrorDialog(msg);
-						})
-					});
-				}
+						this.showErrorDialog(err.message);
+					}
+				},
 			});
 		},
 		showDialogTags() {
 			this.dialogTags.visible = true;
 			this.dialogTags.editMode = false;
-			this.dialogTags.secondText = this.activeAccount.owner ? "Rename Tags" : "";
+			this.dialogTags.secondText = this.activeAccount.owner
+				? "Rename Tags"
+				: "";
 		},
 		showDialogRenameTag(tag) {
 			this.showDialog({
 				title: "Rename Tag",
 				content: `Change the name for tag "#${tag.name}"`,
-				fields: [{
-					name: "newName",
-					label: "New tag name",
-					value: tag.name,
-				}],
+				fields: [
+					{
+						name: "newName",
+						label: "New tag name",
+						value: tag.name,
+					},
+				],
 				mainText: "OK",
 				secondText: "Cancel",
 				secondClick: () => {
@@ -821,27 +879,26 @@ export default {
 					this.dialog.visible = false;
 					this.dialogTags.visible = true;
 				},
-				mainClick: (data) => {
+				mainClick: async (data) => {
 					// Save the old query
 					var rxSpace = /\s+/g,
-						oldTagQuery = rxSpace.test(tag.name) ? `"#${tag.name}"` : `#${tag.name}`,
-						newTagQuery = rxSpace.test(data.newName) ? `"#${data.newName}"` : `#${data.newName}`;
-
-					// Send data
-					var newData = {
-						id: tag.id,
-						name: data.newName,
-					};
+						oldTagQuery = rxSpace.test(tag.name)
+							? `"#${tag.name}"`
+							: `#${tag.name}`,
+						newTagQuery = rxSpace.test(data.newName)
+							? `"#${data.newName}"`
+							: `#${data.newName}`;
 
 					this.dialog.loading = true;
-					fetch(new URL("api/tag", document.baseURI), {
-						method: "PUT",
-						body: JSON.stringify(newData),
-						headers: { "Content-Type": "application/json" },
-					}).then(response => {
-						if (!response.ok) throw response;
-						return response.json();
-					}).then(() => {
+					try {
+						await apiRequest(
+							new URL("api/v1/tags/" + tag.id, document.baseURI),
+							{
+								method: "PUT",
+								body: JSON.stringify({ name: data.newName }),
+							},
+						);
+
 						tag.name = data.newName;
 
 						this.dialog.loading = false;
@@ -861,19 +918,20 @@ export default {
 							this.search = this.search.replace(oldTagQuery, newTagQuery);
 							this.loadData();
 						}
-					}).catch(err => {
+					} catch (err) {
 						this.dialog.loading = false;
 						this.dialogTags.visible = false;
 						this.dialogTags.editMode = false;
-						this.getErrorMessage(err).then(msg => {
-							this.showErrorDialog(msg);
-						})
-					});
+						this.showErrorDialog(err.message);
+					}
 				},
 			});
 		},
 	},
 	mounted() {
+		this.$bus.$on("clearHomePage", () => {
+			this.clearHomePage();
+		});
 		// Prepare history state watcher
 		var stateWatcher = (e) => {
 			var state = e.state || {},
@@ -886,18 +944,48 @@ export default {
 			this.page = page;
 			this.search = search;
 			this.loadData(false);
-		}
+		};
 
-		window.addEventListener('popstate', stateWatcher);
-		this.$once('hook:beforeDestroy', () => {
-			window.removeEventListener('popstate', stateWatcher);
-		})
+		window.addEventListener("popstate", stateWatcher);
+		this.$once("hook:beforeDestroy", () => {
+			window.removeEventListener("popstate", stateWatcher);
+		});
 
 		// Set initial parameter
-		var url = new Url;
+		var url = new Url();
 		this.search = url.query.search || "";
 		this.page = url.query.page || 1;
 
+		var isSharing =
+			url.query.url !== undefined || url.query.excerpt !== undefined;
+		if (isSharing) {
+			// this is what the spec says
+			var shareData = {
+				url: url.query.url,
+				excerpt: url.query.excerpt,
+				title: url.query.title,
+			};
+
+			// In my testing sharing from chrome and ff focus, this is how data arrives
+			if (shareData.url === undefined) {
+				shareData.url = url.query.excerpt;
+				shareData.title = url.query.title;
+				shareData.excerpt = "";
+			}
+
+			this.showDialogAdd(shareData);
+			var history = {
+				activePage: "page-home",
+				search: this.search,
+				page: this.page,
+			};
+
+			var url = new Url(document.baseURI);
+			url.hash = "home";
+			url.clearQuery();
+			window.history.replaceState(history, "page-home", url);
+		}
+
 		this.loadData(false, true);
-	}
-}
+	},
+};

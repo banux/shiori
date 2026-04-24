@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-shiori/shiori/internal/database"
 	"github.com/go-shiori/shiori/internal/model"
 	"github.com/spf13/cobra"
 )
@@ -54,8 +53,8 @@ func checkHandler(cmd *cobra.Command, args []string) {
 	}
 
 	// Fetch bookmarks from database
-	filterOptions := database.GetBookmarksOptions{IDs: ids}
-	bookmarks, err := deps.Database.GetBookmarks(cmd.Context(), filterOptions)
+	filterOptions := model.DBGetBookmarksOptions{IDs: ids}
+	bookmarks, err := deps.Database().GetBookmarks(cmd.Context(), filterOptions)
 	if err != nil {
 		cError.Printf("Failed to get bookmarks: %v\n", err)
 		os.Exit(1)
@@ -76,7 +75,7 @@ func checkHandler(cmd *cobra.Command, args []string) {
 	for i, book := range bookmarks {
 		wg.Add(1)
 
-		go func(i int, book model.Bookmark) {
+		go func(i int, book model.BookmarkDTO) {
 			// Make sure to finish the WG
 			defer wg.Done()
 

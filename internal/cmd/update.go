@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/go-shiori/shiori/internal/core"
-	"github.com/go-shiori/shiori/internal/database"
 	"github.com/go-shiori/shiori/internal/model"
 	"github.com/spf13/cobra"
 )
@@ -52,7 +51,7 @@ func updateHandler(cmd *cobra.Command, args []string) {
 	skipConfirm, _ := cmd.Flags().GetBool("yes")
 	noArchival, _ := cmd.Flags().GetBool("no-archival")
 	logArchival, _ := cmd.Flags().GetBool("log-archival")
-	keepMetadata := cmd.Flags().Changed("keep-metadata")
+	keep_metadata := cmd.Flags().Changed("keep-metadata")
 
 	// If no arguments (i.e all bookmarks going to be updated), confirm to user
 	if len(args) == 0 && !skipConfirm {
@@ -92,11 +91,11 @@ func updateHandler(cmd *cobra.Command, args []string) {
 	}
 
 	// Fetch bookmarks from database
-	filterOptions := database.GetBookmarksOptions{
+	filterOptions := model.DBGetBookmarksOptions{
 		IDs: ids,
 	}
 
-	bookmarks, err := deps.Database.GetBookmarks(cmd.Context(), filterOptions)
+	bookmarks, err := deps.Database().GetBookmarks(cmd.Context(), filterOptions)
 	if err != nil {
 		cError.Printf("Failed to get bookmarks: %v\n", err)
 		os.Exit(1)
@@ -147,7 +146,7 @@ func updateHandler(cmd *cobra.Command, args []string) {
 				book.URL = url
 			}
 
-			go func(i int, book model.Bookmark) {
+			go func(i int, book model.BookmarkDTO) {
 				// Make sure to finish the WG
 				defer wg.Done()
 
@@ -170,12 +169,12 @@ func updateHandler(cmd *cobra.Command, args []string) {
 					Bookmark:    book,
 					Content:     content,
 					ContentType: contentType,
-					KeepTitle:   keepMetadata,
-					KeepExcerpt: keepMetadata,
+					KeepTitle:   keep_metadata,
+					KeepExcerpt: keep_metadata,
 					LogArchival: logArchival,
 				}
 
-				book, _, err = core.ProcessBookmark(request)
+				book, _, err = core.ProcessBookmark(deps, request)
 				content.Close()
 
 				if err != nil {
@@ -263,7 +262,7 @@ func updateHandler(cmd *cobra.Command, args []string) {
 			tmpAddedTags[key] = value
 		}
 
-		newTags := []model.Tag{}
+		newTags := []model.TagDTO{}
 		for _, tag := range book.Tags {
 			if _, isDeleted := deletedTags[tag.Name]; isDeleted {
 				tag.Deleted = true
@@ -277,7 +276,9 @@ func updateHandler(cmd *cobra.Command, args []string) {
 		}
 
 		for tag := range tmpAddedTags {
-			newTags = append(newTags, model.Tag{Name: tag})
+			newTags = append(newTags, model.TagDTO{
+				Tag: model.Tag{Name: tag},
+			})
 		}
 
 		book.Tags = newTags
@@ -287,7 +288,7 @@ func updateHandler(cmd *cobra.Command, args []string) {
 	}
 
 	// Save bookmarks to database
-	bookmarks, err = deps.Database.SaveBookmarks(cmd.Context(), false, bookmarks...)
+	bookmarks, err = deps.Database().SaveBookmarks(cmd.Context(), false, bookmarks...)
 	if err != nil {
 		cError.Printf("Failed to save bookmark: %v\n", err)
 		os.Exit(1)

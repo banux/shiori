@@ -7,63 +7,151 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/go-shiori/shiori/internal/http/webcontext"
 	"github.com/go-shiori/shiori/internal/model"
 	"github.com/go-shiori/shiori/internal/testutil"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
-func TestAuthenticationRequiredMiddleware(t *testing.T) {
-	t.Run("test unauthorized", func(t *testing.T) {
-		g := testutil.NewGin()
-		g.Use(AuthenticationRequired())
-		w := testutil.PerformRequest(g, "GET", "/")
+func TestAuthMiddleware(t *testing.T) {
+	logger := logrus.New()
+	_, deps := testutil.GetTestConfigurationAndDependencies(t, context.TODO(), logger)
+
+	t.Run("test no authorization method", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		c := webcontext.NewWebContext(w, r)
+
+		middleware := NewAuthMiddleware(deps)
+		err := middleware.OnRequest(deps, c)
+		require.NoError(t, err)
+		require.Nil(t, c.GetAccount())
+	})
+
+	t.Run("test authorization header", func(t *testing.T) {
+		account := testutil.GetValidAccount().ToDTO()
+		token, err := deps.Domains().Auth().CreateTokenForAccount(&account, time.Now().Add(time.Minute))
+		require.NoError(t, err)
+
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set(model.AuthorizationHeader, model.AuthorizationTokenType+" "+token)
+		c := webcontext.NewWebContext(w, r)
+
+		middleware := NewAuthMiddleware(deps)
+		err = middleware.OnRequest(deps, c)
+		require.NoError(t, err)
+		require.NotNil(t, c.GetAccount())
+	})
+
+	t.Run("test authorization cookie", func(t *testing.T) {
+		account := model.AccountDTO{Username: "shiori"}
+		token, err := deps.Domains().Auth().CreateTokenForAccount(&account, time.Now().Add(time.Minute))
+		require.NoError(t, err)
+
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.AddCookie(&http.Cookie{
+			Name:   "token",
+			Value:  token,
+			MaxAge: int(time.Now().Add(time.Minute).Unix()),
+		})
+		c := webcontext.NewWebContext(w, r)
+
+		middleware := NewAuthMiddleware(deps)
+		err = middleware.OnRequest(deps, c)
+		require.NoError(t, err)
+		require.NotNil(t, c.GetAccount())
+	})
+
+	t.Run("test invalid token cookie is removed", func(t *testing.T) {
+		// Create an invalid token
+		invalidToken := "invalid-token"
+
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.AddCookie(&http.Cookie{
+			Name:   "token",
+			Value:  invalidToken,
+			MaxAge: int(time.Now().Add(time.Minute).Unix()),
+		})
+		c := webcontext.NewWebContext(w, r)
+
+		middleware := NewAuthMiddleware(deps)
+		err := middleware.OnRequest(deps, c)
+		require.NoError(t, err)
+		require.Nil(t, c.GetAccount())
+
+		// Check that the token cookie was removed in the response
+		responseCookies := w.Result().Cookies()
+
+		var tokenCookie *http.Cookie
+		for _, cookie := range responseCookies {
+			if cookie.Name == "token" {
+				tokenCookie = cookie
+				break
+			}
+		}
+
+		require.NotNil(t, tokenCookie, "Token cookie should exist in response")
+		require.Empty(t, tokenCookie.Value, "Token cookie value should be empty")
+	})
+}
+
+func TestRequireLoggedInUser(t *testing.T) {
+	logger := logrus.New()
+	_, deps := testutil.GetTestConfigurationAndDependencies(t, context.TODO(), logger)
+
+	t.Run("returns error when user not logged in", func(t *testing.T) {
+		c, w := testutil.NewTestWebContext()
+		err := RequireLoggedInUser(deps, c)
+		require.Error(t, err)
+		require.Equal(t, "authentication required", err.Error())
 		require.Equal(t, http.StatusUnauthorized, w.Code)
 	})
 
-	t.Run("test authorized", func(t *testing.T) {
-		g := testutil.NewGin()
-		// Fake a logged in user in the context, which is the way the AuthMiddleware works.
-		g.Use(func(ctx *gin.Context) {
-			ctx.Set(model.ContextAccountKey, "test")
-		})
-		g.Use(AuthenticationRequired())
-		g.GET("/", func(c *gin.Context) {
-			c.Status(http.StatusOK)
-		})
-		w := testutil.PerformRequest(g, "GET", "/")
+	t.Run("succeeds when user is logged in", func(t *testing.T) {
+		c, w := testutil.NewTestWebContext()
+		testutil.SetFakeUser(c)
+		err := RequireLoggedInUser(deps, c)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("succeeds when admin is logged in", func(t *testing.T) {
+		c, w := testutil.NewTestWebContext()
+		testutil.SetFakeAdmin(c)
+		err := RequireLoggedInUser(deps, c)
+		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, w.Code)
 	})
 }
 
-func TestAuthMiddleware(t *testing.T) {
-	ctx := context.TODO()
+func TestRequireLoggedInAdmin(t *testing.T) {
 	logger := logrus.New()
-	_, deps := testutil.GetTestConfigurationAndDependencies(t, ctx, logger)
-	middleware := AuthMiddleware(deps)
+	_, deps := testutil.GetTestConfigurationAndDependencies(t, context.TODO(), logger)
 
-	t.Run("test no authorization header", func(t *testing.T) {
-		w := httptest.NewRecorder()
-		c, router := gin.CreateTestContext(w)
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		router.Use(middleware)
-		router.ServeHTTP(w, req)
-
-		_, exists := c.Get("account")
-		require.False(t, exists)
+	t.Run("returns error when user not logged in", func(t *testing.T) {
+		c, w := testutil.NewTestWebContext()
+		err := RequireLoggedInAdmin(deps, c)
+		require.Error(t, err)
+		require.Equal(t, http.StatusUnauthorized, w.Code)
 	})
 
-	t.Run("test authorization header", func(t *testing.T) {
-		account := model.Account{Username: "shiori"}
-		token, err := deps.Domains.Auth.CreateTokenForAccount(&account, time.Now().Add(time.Minute))
+	t.Run("returns error when non-admin user is logged in", func(t *testing.T) {
+		c, w := testutil.NewTestWebContext()
+		testutil.SetFakeUser(c)
+		err := RequireLoggedInAdmin(deps, c)
+		require.Error(t, err)
+		require.Equal(t, http.StatusForbidden, w.Code)
+	})
+
+	t.Run("succeeds when admin is logged in", func(t *testing.T) {
+		c, w := testutil.NewTestWebContext()
+		testutil.SetFakeAdmin(c)
+		err := RequireLoggedInAdmin(deps, c)
 		require.NoError(t, err)
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request, _ = http.NewRequest("GET", "/", nil)
-		c.Request.Header.Set(model.AuthorizationHeader, model.AuthorizationTokenType+" "+token)
-		middleware(c)
-		_, exists := c.Get(model.ContextAccountKey)
-		require.True(t, exists)
+		require.Equal(t, http.StatusOK, w.Code)
 	})
 }

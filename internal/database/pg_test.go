@@ -1,13 +1,15 @@
+//go:build !test_sqlite_only
+// +build !test_sqlite_only
+
 package database
 
 import (
 	"context"
-	"errors"
 	"log"
 	"os"
 	"testing"
 
-	"github.com/golang-migrate/migrate/v4"
+	"github.com/go-shiori/shiori/internal/model"
 )
 
 func init() {
@@ -17,18 +19,18 @@ func init() {
 	}
 }
 
-func postgresqlTestDatabaseFactory(ctx context.Context) (DB, error) {
+func postgresqlTestDatabaseFactory(_ *testing.T, ctx context.Context) (model.DB, error) {
 	db, err := OpenPGDatabase(ctx, os.Getenv("SHIORI_TEST_PG_URL"))
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = db.Exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+	_, err = db.ExecContext(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
 	if err != nil {
 		return nil, err
 	}
 
-	if err := db.Migrate(); err != nil && !errors.Is(migrate.ErrNoChange, err) {
+	if err := db.Migrate(context.TODO()); err != nil {
 		return nil, err
 	}
 

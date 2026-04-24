@@ -1,27 +1,58 @@
 GO ?= $(shell command -v go 2> /dev/null)
 BASH ?= $(shell command -v bash 2> /dev/null)
+GOLANG_VERSION := $(shell head -n 4 go.mod | tail -n 1 | cut -d " " -f 2)
 
 # Development
 SHIORI_DIR ?= dev-data
-
-# Testing
-GO_TEST_FLAGS ?= -v -race
-GOTESTFMT_FLAGS ?=
+SOURCE_FILES ?=./internal/...
 
 # Build
 CGO_ENABLED ?= 0
 BUILD_TIME := $(shell date -u +%Y%m%d.%H%M%S)
 BUILD_HASH := $(shell git describe --tags)
-BUILD_TAGS ?= osusergo,netgo
+BUILD_TAGS ?= osusergo,netgo,fts5
 LDFLAGS += -s -w -X main.version=$(BUILD_HASH) -X main.date=$(BUILD_TIME)
+
+# Build (container)
+CONTAINER_RUNTIME := docker
+CONTAINERFILE_NAME := Dockerfile
+CONTAINER_ALPINE_VERSION := 3.22
+BUILDX_PLATFORMS := linux/amd64,linux/arm64,linux/arm/v7
+
+# This is used for local development only, forcing linux to create linux only images but with the arch
+# of the running machine. Far from perfect but works.
+LOCAL_BUILD_PLATFORM = linux/$(shell go env GOARCH)
+
+# Testing
+GO_TEST_FLAGS ?= -v -race -count=1 -tags $(BUILD_TAGS) -covermode=atomic -coverprofile=coverage.out
+GOTESTFMT_FLAGS ?=
+SHIORI_TEST_MYSQL_URL ?=shiori:shiori@tcp(127.0.0.1:3306)/shiori
+SHIORI_TEST_MARIADB_URL ?= shiori:shiori@tcp(127.0.0.1:3307)/shiori
+SHIORI_TEST_PG_URL ?= postgres://shiori:shiori@127.0.0.1:5432/shiori?sslmode=disable
 
 # Development
 GIN_MODE ?= debug
 SHIORI_DEVELOPMENT ?= true
 
 # Swagger
-SWAG_VERSION := v1.8.12
+SWAG_VERSION := $(shell grep "swaggo/swag" go.mod | cut -d " " -f 2)
 SWAGGER_DOCS_PATH ?= ./docs/swagger
+
+# Frontend
+CLEANCSS_OPTS ?= --with-rebase
+
+# Common exports
+export GOLANG_VERSION
+export CONTAINER_RUNTIME
+export CONTAINERFILE_NAME
+export CONTAINER_ALPINE_VERSION
+export BUILDX_PLATFORMS
+
+export SOURCE_FILES
+
+export SHIORI_TEST_MYSQL_URL
+export SHIORI_TEST_MARIADB_URL
+export SHIORI_TEST_PG_URL
 
 # Help documentatin à la https://marmelab.com/blog/2016/02/29/auto-documented-makefile.html
 .PHONY: help
@@ -33,15 +64,15 @@ help:
 clean:
 	rm -rf dist
 
-## Runs the legacy http API for local development
-.PHONY: serve
-serve:
-	SHIORI_DEVELOPMENT=$(SHIORI_DEVELOPMENT) SHIORI_DIR=$(SHIORI_DIR) go run main.go serve
-
 ## Runs server for local development
 .PHONY: run-server
-run-server:
-	GIN_MODE=$(GIN_MODE) SHIORI_DEVELOPMENT=$(SHIORI_DEVELOPMENT) SHIORI_DIR=$(SHIORI_DIR) go run main.go server
+run-server: generate
+	GIN_MODE=$(GIN_MODE) SHIORI_DEVELOPMENT=$(SHIORI_DEVELOPMENT) go run main.go server --log-level debug
+
+## Runs server for local development with v2 web UI
+.PHONY: run-server-v2
+run-server-v2: generate
+	GIN_MODE=$(GIN_MODE) SHIORI_DEVELOPMENT=$(SHIORI_DEVELOPMENT) SHIORI_HTTP_SERVE_WEB_UI_V2=true go run main.go server --log-level debug
 
 ## Generate swagger docs
 .PHONY: swagger
@@ -71,13 +102,50 @@ golangci-lint:
 unittest:
 	GIN_MODE=$(GIN_MODE) GO_TEST_FLAGS="$(GO_TEST_FLAGS)" GOTESTFMT_FLAGS="$(GOTESTFMT_FLAGS)" $(BASH) -xe ./scripts/test.sh
 
+## Run end to end tests
+.PHONY: e2e
+e2e:
+	$(BASH) -xe ./scripts/e2e.sh
+
+## Build styles
+.PHONY: styles
+styles:
+	CLEANCSS_OPTS=$(CLEANCSS_OPTS) $(BASH) ./scripts/styles.sh
+
+## Build styles
+.PHONY: styles-check
+styles-check:
+	CLEANCSS_OPTS=$(CLEANCSS_OPTS) $(BASH) ./scripts/styles_check.sh
+
 ## Build binary
 .PHONY: build
 build: clean
-	GIN_MODE=$(GIN_MODE) goreleaser build --rm-dist --snapshot
+	GIN_MODE=$(GIN_MODE) goreleaser build --clean --snapshot
+
+## Build binary for current targer
+build-local: clean
+	GIN_MODE=$(GIN_MODE) goreleaser build --clean --snapshot --single-target
+
+## Build docker image using Buildx.
+# used for multi-arch builds suing mainly the CI, that's why the task does not
+# build the binaries using a dependency task.
+.PHONY: buildx
+buildx:
+	$(info: Make: Buildx)
+	@bash scripts/buildx.sh
+
+## Build docker image for local development
+buildx-local: build-local
+	$(info: Make: Build image locally)
+	CONTAINER_BUILDX_OPTIONS="-t shiori:localdev --output type=docker" BUILDX_PLATFORMS=$(LOCAL_BUILD_PLATFORM) scripts/buildx.sh
 
 ## Creates a coverage report
 .PHONY: coverage
 coverage:
-	$(GO) test $(GO_TEST_FLAGS) -coverprofile=coverage.txt ./...
+	$(GO) test $(GO_TEST_FLAGS) -coverprofile=coverage.txt $(SOURCE_FILES)
 	$(GO) tool cover -html=coverage.txt
+
+## Run generate accross the project
+.PHONY: generate
+generate:
+	$(GO) generate ./...

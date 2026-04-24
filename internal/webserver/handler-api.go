@@ -12,16 +12,13 @@ import (
 	fp "path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/go-shiori/shiori/internal/core"
-	"github.com/go-shiori/shiori/internal/database"
 	"github.com/go-shiori/shiori/internal/model"
 	"github.com/julienschmidt/httprouter"
-	"golang.org/x/crypto/bcrypt"
 )
 
-func downloadBookmarkContent(book *model.Bookmark, dataDir string, request *http.Request, keepTitle, keepExcerpt bool) (*model.Bookmark, error) {
+func downloadBookmarkContent(deps model.Dependencies, book *model.BookmarkDTO, dataDir string, _ *http.Request, keepTitle, keepExcerpt bool) (*model.BookmarkDTO, error) {
 	content, contentType, err := core.DownloadBookmark(book.URL)
 	if err != nil {
 		return nil, fmt.Errorf("error downloading url: %s", err)
@@ -36,7 +33,7 @@ func downloadBookmarkContent(book *model.Bookmark, dataDir string, request *http
 		KeepExcerpt: keepExcerpt,
 	}
 
-	result, isFatalErr, err := core.ProcessBookmark(processRequest)
+	result, isFatalErr, err := core.ProcessBookmark(deps, processRequest)
 	content.Close()
 
 	if err != nil && isFatalErr {
@@ -44,17 +41,6 @@ func downloadBookmarkContent(book *model.Bookmark, dataDir string, request *http
 	}
 
 	return &result, err
-}
-
-// ApiLogout is handler for POST /api/logout
-func (h *Handler) ApiLogout(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	// Get session ID
-	sessionID := h.GetSessionID(r)
-	if sessionID != "" {
-		h.SessionCache.Delete(sessionID)
-	}
-
-	fmt.Fprint(w, 1)
 }
 
 // ApiGetBookmarks is handler for GET /api/bookmarks
@@ -87,13 +73,13 @@ func (h *Handler) ApiGetBookmarks(w http.ResponseWriter, r *http.Request, ps htt
 	}
 
 	// Prepare filter for database
-	searchOptions := database.GetBookmarksOptions{
+	searchOptions := model.DBGetBookmarksOptions{
 		Tags:         tags,
 		ExcludedTags: excludedTags,
 		Keyword:      keyword,
 		Limit:        30,
 		Offset:       (page - 1) * 30,
-		OrderMethod:  database.ByLastAdded,
+		OrderMethod:  model.ByLastAdded,
 	}
 
 	// Calculate max page
@@ -112,14 +98,14 @@ func (h *Handler) ApiGetBookmarks(w http.ResponseWriter, r *http.Request, ps htt
 		archivePath := fp.Join(h.DataDir, "archive", strID)
 		ebookPath := fp.Join(h.DataDir, "ebook", strID+".epub")
 
-		if fileExists(imgPath) {
+		if FileExists(imgPath) {
 			bookmarks[i].ImageURL = path.Join(h.RootPath, "bookmark", strID, "thumb")
 		}
 
-		if fileExists(archivePath) {
+		if FileExists(archivePath) {
 			bookmarks[i].HasArchive = true
 		}
-		if fileExists(ebookPath) {
+		if FileExists(ebookPath) {
 			bookmarks[i].HasEbook = true
 		}
 	}
@@ -145,7 +131,9 @@ func (h *Handler) ApiGetTags(w http.ResponseWriter, r *http.Request, ps httprout
 	checkError(err)
 
 	// Fetch all tags
-	tags, err := h.DB.GetTags(ctx)
+	tags, err := h.DB.GetTags(ctx, model.DBListTagsOptions{
+		WithBookmarkCount: true,
+	})
 	checkError(err)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -179,7 +167,8 @@ type apiInsertBookmarkPayload struct {
 	Title         string      `json:"title"`
 	Excerpt       string      `json:"excerpt"`
 	Tags          []model.Tag `json:"tags"`
-	CreateArchive bool        `json:"createArchive"`
+	CreateArchive bool        `json:"create_archive"`
+	CreateEbook   bool        `json:"create_ebook"`
 	MakePublic    int         `json:"public"`
 	Async         bool        `json:"async"`
 }
@@ -189,6 +178,7 @@ type apiInsertBookmarkPayload struct {
 func newAPIInsertBookmarkPayload() *apiInsertBookmarkPayload {
 	return &apiInsertBookmarkPayload{
 		CreateArchive: false,
+		CreateEbook:   false,
 		Async:         true,
 	}
 }
@@ -206,13 +196,18 @@ func (h *Handler) ApiInsertBookmark(w http.ResponseWriter, r *http.Request, ps h
 	err = json.NewDecoder(r.Body).Decode(&payload)
 	checkError(err)
 
-	book := &model.Bookmark{
+	book := &model.BookmarkDTO{
 		URL:           payload.URL,
 		Title:         payload.Title,
 		Excerpt:       payload.Excerpt,
-		Tags:          payload.Tags,
+		Tags:          make([]model.TagDTO, len(payload.Tags)),
 		Public:        payload.MakePublic,
 		CreateArchive: payload.CreateArchive,
+		CreateEbook:   payload.CreateEbook,
+	}
+
+	for i, tag := range payload.Tags {
+		book.Tags[i] = tag.ToDTO()
 	}
 
 	// Clean up bookmark URL
@@ -237,7 +232,7 @@ func (h *Handler) ApiInsertBookmark(w http.ResponseWriter, r *http.Request, ps h
 
 	if payload.Async {
 		go func() {
-			bookmark, err := downloadBookmarkContent(book, h.DataDir, r, userHasDefinedTitle, book.Excerpt != "")
+			bookmark, err := downloadBookmarkContent(h.dependencies, book, h.DataDir, r, userHasDefinedTitle, book.Excerpt != "")
 			if err != nil {
 				log.Printf("error downloading boorkmark: %s", err)
 				return
@@ -249,7 +244,7 @@ func (h *Handler) ApiInsertBookmark(w http.ResponseWriter, r *http.Request, ps h
 	} else {
 		// Workaround. Download content after saving the bookmark so we have the proper database
 		// id already set in the object regardless of the database engine.
-		book, err = downloadBookmarkContent(book, h.DataDir, r, userHasDefinedTitle, book.Excerpt != "")
+		book, err = downloadBookmarkContent(h.dependencies, book, h.DataDir, r, userHasDefinedTitle, book.Excerpt != "")
 		if err != nil {
 			log.Printf("error downloading boorkmark: %s", err)
 		} else if _, err := h.DB.SaveBookmarks(ctx, false, *book); err != nil {
@@ -263,7 +258,7 @@ func (h *Handler) ApiInsertBookmark(w http.ResponseWriter, r *http.Request, ps h
 	checkError(err)
 }
 
-// apiDeleteBookmarks is handler for DELETE /api/bookmark
+// ApiDeleteBookmarks is handler for DELETE /api/bookmark
 func (h *Handler) ApiDeleteBookmark(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 	ctx := r.Context()
 
@@ -304,7 +299,7 @@ func (h *Handler) ApiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps h
 	checkError(err)
 
 	// Decode request
-	request := model.Bookmark{}
+	request := model.BookmarkDTO{}
 	err = json.NewDecoder(r.Body).Decode(&request)
 	checkError(err)
 
@@ -314,7 +309,7 @@ func (h *Handler) ApiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps h
 	}
 
 	// Get existing bookmark from database
-	filter := database.GetBookmarksOptions{
+	filter := model.DBGetBookmarksOptions{
 		IDs:         []int{request.ID},
 		WithContent: true,
 	}
@@ -357,6 +352,9 @@ func (h *Handler) ApiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps h
 		}
 	}
 
+	// Set bookmark modified
+	book.ModifiedAt = ""
+
 	// Update database
 	res, err := h.DB.SaveBookmarks(ctx, false, book)
 	checkError(err)
@@ -369,225 +367,6 @@ func (h *Handler) ApiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps h
 	// Return new saved result
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(&newBook)
-	checkError(err)
-}
-
-// ApiDownloadEbook is handler for PUT /api/ebook
-func (h *Handler) ApiDownloadEbook(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	// Make sure session still valid
-	err := h.validateSession(r)
-	checkError(err)
-
-	// Decode request
-	request := struct {
-		IDs []int `json:"ids"`
-	}{}
-	err = json.NewDecoder(r.Body).Decode(&request)
-	checkError(err)
-
-	// Get existing bookmark from database
-	filter := database.GetBookmarksOptions{
-		IDs:         request.IDs,
-		WithContent: true,
-	}
-
-	bookmarks, err := h.DB.GetBookmarks(ctx, filter)
-	checkError(err)
-	if len(bookmarks) == 0 {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Fetch data from internet
-	mx := sync.RWMutex{}
-	wg := sync.WaitGroup{}
-	chDone := make(chan struct{})
-	chProblem := make(chan int, 10)
-	semaphore := make(chan struct{}, 10)
-
-	for i, book := range bookmarks {
-		wg.Add(1)
-
-		go func(i int, book model.Bookmark) {
-			// Make sure to finish the WG
-			defer wg.Done()
-
-			// Register goroutine to semaphore
-			semaphore <- struct{}{}
-			defer func() {
-				<-semaphore
-			}()
-
-			// Download data from internet
-			content, contentType, err := core.DownloadBookmark(book.URL)
-			if err != nil {
-				chProblem <- book.ID
-				return
-			}
-
-			request := core.ProcessRequest{
-				DataDir:     h.DataDir,
-				Bookmark:    book,
-				Content:     content,
-				ContentType: contentType,
-			}
-
-			book, err = core.GenerateEbook(request)
-			content.Close()
-
-			if err != nil {
-				chProblem <- book.ID
-				return
-			}
-
-			// Update list of bookmarks
-			mx.Lock()
-			bookmarks[i] = book
-			mx.Unlock()
-		}(i, book)
-	}
-	// Receive all problematic bookmarks
-	idWithProblems := []int{}
-	go func() {
-		for {
-			select {
-			case <-chDone:
-				return
-			case id := <-chProblem:
-				idWithProblems = append(idWithProblems, id)
-			}
-		}
-	}()
-
-	// Wait until all download finished
-	wg.Wait()
-	close(chDone)
-
-	w.Header().Set("Content-Type", "application1/json")
-	err = json.NewEncoder(w).Encode(&bookmarks)
-	checkError(err)
-}
-
-// ApiUpdateCache is handler for PUT /api/cache
-func (h *Handler) ApiUpdateCache(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	// Make sure session still valid
-	err := h.validateSession(r)
-	checkError(err)
-
-	// Decode request
-	request := struct {
-		IDs           []int `json:"ids"`
-		KeepMetadata  bool  `json:"keepMetadata"`
-		CreateArchive bool  `json:"createArchive"`
-		CreateEbook   bool  `json:"createEbook"`
-	}{}
-
-	err = json.NewDecoder(r.Body).Decode(&request)
-	checkError(err)
-
-	// Get existing bookmark from database
-	filter := database.GetBookmarksOptions{
-		IDs:         request.IDs,
-		WithContent: true,
-	}
-
-	bookmarks, err := h.DB.GetBookmarks(ctx, filter)
-	checkError(err)
-	if len(bookmarks) == 0 {
-		panic(fmt.Errorf("no bookmark with matching ids"))
-	}
-
-	// For web interface, let's limit to max 20 IDs to update, and 5 for archival.
-	// This is done to prevent the REST request from client took too long to finish.
-	if len(bookmarks) > 20 {
-		panic(fmt.Errorf("max 20 bookmarks to update"))
-	} else if len(bookmarks) > 5 && request.CreateArchive {
-		panic(fmt.Errorf("max 5 bookmarks to update with archival"))
-	}
-
-	// Fetch data from internet
-	mx := sync.RWMutex{}
-	wg := sync.WaitGroup{}
-	chDone := make(chan struct{})
-	chProblem := make(chan int, 10)
-	semaphore := make(chan struct{}, 10)
-
-	for i, book := range bookmarks {
-		wg.Add(1)
-
-		// Mark whether book will be archived or ebook generate request
-		book.CreateArchive = request.CreateArchive
-		book.CreateEbook = request.CreateEbook
-
-		go func(i int, book model.Bookmark, keepMetadata bool) {
-			// Make sure to finish the WG
-			defer wg.Done()
-
-			// Register goroutine to semaphore
-			semaphore <- struct{}{}
-			defer func() {
-				<-semaphore
-			}()
-
-			// Download data from internet
-			content, contentType, err := core.DownloadBookmark(book.URL)
-			if err != nil {
-				chProblem <- book.ID
-				return
-			}
-
-			request := core.ProcessRequest{
-				DataDir:     h.DataDir,
-				Bookmark:    book,
-				Content:     content,
-				ContentType: contentType,
-				KeepTitle:   keepMetadata,
-				KeepExcerpt: keepMetadata,
-			}
-
-			book, _, err = core.ProcessBookmark(request)
-			content.Close()
-
-			if err != nil {
-				chProblem <- book.ID
-				return
-			}
-
-			// Update list of bookmarks
-			mx.Lock()
-			bookmarks[i] = book
-			mx.Unlock()
-		}(i, book, request.KeepMetadata)
-	}
-
-	// Receive all problematic bookmarks
-	idWithProblems := []int{}
-	go func() {
-		for {
-			select {
-			case <-chDone:
-				return
-			case id := <-chProblem:
-				idWithProblems = append(idWithProblems, id)
-			}
-		}
-	}()
-
-	// Wait until all download finished
-	wg.Wait()
-	close(chDone)
-
-	// Update database
-	_, err = h.DB.SaveBookmarks(ctx, false, bookmarks...)
-	checkError(err)
-
-	// Return new saved result
-	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(&bookmarks)
 	checkError(err)
 }
 
@@ -614,7 +393,7 @@ func (h *Handler) ApiUpdateBookmarkTags(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Get existing bookmark from database
-	filter := database.GetBookmarksOptions{
+	filter := model.DBGetBookmarksOptions{
 		IDs:         request.IDs,
 		WithContent: true,
 	}
@@ -636,7 +415,7 @@ func (h *Handler) ApiUpdateBookmarkTags(w http.ResponseWriter, r *http.Request, 
 			}
 
 			if newTag.ID == 0 {
-				book.Tags = append(book.Tags, newTag)
+				book.Tags = append(book.Tags, newTag.ToDTO())
 			}
 		}
 
@@ -653,7 +432,7 @@ func (h *Handler) ApiUpdateBookmarkTags(w http.ResponseWriter, r *http.Request, 
 		imgPath := fp.Join(h.DataDir, "thumb", strID)
 		imgURL := path.Join(h.RootPath, "bookmark", strID, "thumb")
 
-		if fileExists(imgPath) {
+		if FileExists(imgPath) {
 			bookmarks[i].ImageURL = imgURL
 		}
 	}
@@ -661,126 +440,4 @@ func (h *Handler) ApiUpdateBookmarkTags(w http.ResponseWriter, r *http.Request, 
 	// Return new saved result
 	err = json.NewEncoder(w).Encode(&bookmarks)
 	checkError(err)
-}
-
-// ApiGetAccounts is handler for GET /api/accounts
-func (h *Handler) ApiGetAccounts(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	// Make sure session still valid
-	err := h.validateSession(r)
-	checkError(err)
-
-	// Get list of usernames from database
-	accounts, err := h.DB.GetAccounts(ctx, database.GetAccountsOptions{})
-	checkError(err)
-
-	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(&accounts)
-	checkError(err)
-}
-
-// ApiInsertAccount is handler for POST /api/accounts
-func (h *Handler) ApiInsertAccount(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	// Make sure session still valid
-	err := h.validateSession(r)
-	checkError(err)
-
-	// Decode request
-	var account model.Account
-	err = json.NewDecoder(r.Body).Decode(&account)
-	checkError(err)
-
-	// Save account to database
-	err = h.DB.SaveAccount(ctx, account)
-	checkError(err)
-
-	fmt.Fprint(w, 1)
-}
-
-// ApiUpdateAccount is handler for PUT /api/accounts
-func (h *Handler) ApiUpdateAccount(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	// Make sure session still valid
-	err := h.validateSession(r)
-	checkError(err)
-
-	// Decode request
-	request := struct {
-		Username    string `json:"username"`
-		OldPassword string `json:"oldPassword"`
-		NewPassword string `json:"newPassword"`
-		Owner       bool   `json:"owner"`
-	}{}
-
-	err = json.NewDecoder(r.Body).Decode(&request)
-	checkError(err)
-
-	// Get existing account data from database
-	account, exist, err := h.DB.GetAccount(ctx, request.Username)
-	checkError(err)
-
-	if !exist {
-		panic(fmt.Errorf("username doesn't exist"))
-	}
-
-	// Compare old password with database
-	err = bcrypt.CompareHashAndPassword([]byte(account.Password), []byte(request.OldPassword))
-	if err != nil {
-		panic(fmt.Errorf("old password doesn't match"))
-	}
-
-	// Save new password to database
-	account.Password = request.NewPassword
-	account.Owner = request.Owner
-	err = h.DB.SaveAccount(ctx, account)
-	checkError(err)
-
-	// Delete user's sessions
-	if val, found := h.UserCache.Get(request.Username); found {
-		userSessions := val.([]string)
-		for _, session := range userSessions {
-			h.SessionCache.Delete(session)
-		}
-
-		h.UserCache.Delete(request.Username)
-	}
-
-	fmt.Fprint(w, 1)
-}
-
-// ApiDeleteAccount is handler for DELETE /api/accounts
-func (h *Handler) ApiDeleteAccount(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	ctx := r.Context()
-
-	// Make sure session still valid
-	err := h.validateSession(r)
-	checkError(err)
-
-	// Decode request
-	usernames := []string{}
-	err = json.NewDecoder(r.Body).Decode(&usernames)
-	checkError(err)
-
-	// Delete accounts
-	err = h.DB.DeleteAccounts(ctx, usernames...)
-	checkError(err)
-
-	// Delete user's sessions
-	var userSessions []string
-	for _, username := range usernames {
-		if val, found := h.UserCache.Get(username); found {
-			userSessions = val.([]string)
-			for _, session := range userSessions {
-				h.SessionCache.Delete(session)
-			}
-
-			h.UserCache.Delete(username)
-		}
-	}
-
-	fmt.Fprint(w, 1)
 }

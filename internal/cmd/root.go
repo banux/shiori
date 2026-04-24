@@ -8,9 +8,11 @@ import (
 
 	"github.com/go-shiori/shiori/internal/config"
 	"github.com/go-shiori/shiori/internal/database"
+	"github.com/go-shiori/shiori/internal/dependencies"
 	"github.com/go-shiori/shiori/internal/domains"
 	"github.com/go-shiori/shiori/internal/model"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/context"
 )
@@ -47,7 +49,7 @@ func ShioriCmd() *cobra.Command {
 	return rootCmd
 }
 
-func initShiori(ctx context.Context, cmd *cobra.Command) (*config.Config, *config.Dependencies) {
+func initShiori(ctx context.Context, cmd *cobra.Command) (*config.Config, *dependencies.Dependencies) {
 	logger := logrus.New()
 
 	portableMode, _ := cmd.Flags().GetBool("portable")
@@ -69,13 +71,18 @@ func initShiori(ctx context.Context, cmd *cobra.Command) (*config.Config, *confi
 	}
 
 	cfg := config.ParseServerConfiguration(ctx, logger)
+	cfg.LogLevel = logger.Level.String()
 
-	if storageDirectory != "" && cfg.Storage.DataDir != "" {
+	if storageDirectory != "" {
 		logger.Warn("--storage-directory is set, overriding SHIORI_DIR.")
 		cfg.Storage.DataDir = storageDirectory
 	}
 
 	cfg.SetDefaults(logger, portableMode)
+
+	if err := cfg.IsValid(); err != nil {
+		logger.WithError(err).Fatal("invalid configuration detected")
+	}
 
 	err := os.MkdirAll(cfg.Storage.DataDir, model.DataDirPerm)
 	if err != nil {
@@ -88,7 +95,7 @@ func initShiori(ctx context.Context, cmd *cobra.Command) (*config.Config, *confi
 	}
 
 	// Migrate
-	if err := db.Migrate(); err != nil {
+	if err := db.Migrate(ctx); err != nil {
 		logger.WithError(err).Fatalf("Error running migration")
 	}
 
@@ -96,35 +103,41 @@ func initShiori(ctx context.Context, cmd *cobra.Command) (*config.Config, *confi
 		logger.Warn("Development mode is ENABLED, this will enable some helpers for local development, unsuitable for production environments")
 	}
 
-	dependencies := config.NewDependencies(logger, db, cfg)
-	dependencies.Domains.Auth = domains.NewAccountsDomain(logger, cfg.Http.SecretKey, db)
-	dependencies.Domains.Archiver = domains.NewArchiverDomain(logger, cfg.Storage.DataDir)
+	dependencies := dependencies.NewDependencies(logger, db, cfg)
+	dependencies.Domains().SetAuth(domains.NewAuthDomain(dependencies))
+	dependencies.Domains().SetAccounts(domains.NewAccountsDomain(dependencies))
+	dependencies.Domains().SetArchiver(domains.NewArchiverDomain(dependencies))
+	dependencies.Domains().SetBookmarks(domains.NewBookmarksDomain(dependencies))
+	dependencies.Domains().SetStorage(domains.NewStorageDomain(dependencies, afero.NewBasePathFs(afero.NewOsFs(), cfg.Storage.DataDir)))
+	dependencies.Domains().SetTags(domains.NewTagsDomain(dependencies))
 
 	// Workaround: Get accounts to make sure at least one is present in the database.
 	// If there's no accounts in the database, create the shiori/gopher account the legacy api
 	// hardcoded in the login handler.
-	accounts, err := db.GetAccounts(cmd.Context(), database.GetAccountsOptions{})
+	accounts, err := dependencies.Domains().Accounts().ListAccounts(cmd.Context())
 	if err != nil {
 		cError.Printf("Failed to get owner account: %v\n", err)
 		os.Exit(1)
 	}
 
 	if len(accounts) == 0 {
-		account := model.Account{
+		account := model.AccountDTO{
 			Username: "shiori",
 			Password: "gopher",
-			Owner:    true,
+			Owner:    model.Ptr(true),
 		}
 
-		if err := db.SaveAccount(cmd.Context(), account); err != nil {
+		if _, err := dependencies.Domains().Accounts().CreateAccount(cmd.Context(), account); err != nil {
 			logger.WithError(err).Fatal("error ensuring owner account")
 		}
 	}
 
+	cfg.DebugConfiguration(logger)
+
 	return cfg, dependencies
 }
 
-func openDatabase(logger *logrus.Logger, ctx context.Context, cfg *config.Config) (database.DB, error) {
+func openDatabase(logger *logrus.Logger, ctx context.Context, cfg *config.Config) (model.DB, error) {
 	if cfg.Database.URL != "" {
 		return database.Connect(ctx, cfg.Database.URL)
 	}
@@ -144,7 +157,7 @@ func openDatabase(logger *logrus.Logger, ctx context.Context, cfg *config.Config
 	return database.OpenSQLiteDatabase(ctx, fp.Join(cfg.Storage.DataDir, "shiori.db"))
 }
 
-func openMySQLDatabase(ctx context.Context) (database.DB, error) {
+func openMySQLDatabase(ctx context.Context) (model.DB, error) {
 	user, _ := os.LookupEnv("SHIORI_MYSQL_USER")
 	password, _ := os.LookupEnv("SHIORI_MYSQL_PASS")
 	dbName, _ := os.LookupEnv("SHIORI_MYSQL_NAME")
@@ -154,7 +167,7 @@ func openMySQLDatabase(ctx context.Context) (database.DB, error) {
 	return database.OpenMySQLDatabase(ctx, connString)
 }
 
-func openPostgreSQLDatabase(ctx context.Context) (database.DB, error) {
+func openPostgreSQLDatabase(ctx context.Context) (model.DB, error) {
 	host, _ := os.LookupEnv("SHIORI_PG_HOST")
 	port, _ := os.LookupEnv("SHIORI_PG_PORT")
 	user, _ := os.LookupEnv("SHIORI_PG_USER")

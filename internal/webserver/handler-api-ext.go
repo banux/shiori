@@ -25,7 +25,7 @@ func (h *Handler) ApiInsertViaExtension(w http.ResponseWriter, r *http.Request, 
 	checkError(err)
 
 	// Decode request
-	request := model.Bookmark{}
+	request := model.BookmarkDTO{}
 	err = json.NewDecoder(r.Body).Decode(&request)
 	checkError(err)
 
@@ -45,7 +45,7 @@ func (h *Handler) ApiInsertViaExtension(w http.ResponseWriter, r *http.Request, 
 	if exist {
 		book.HTML = request.HTML
 
-		mapOldTags := map[string]model.Tag{}
+		mapOldTags := map[string]model.TagDTO{}
 		for _, oldTag := range book.Tags {
 			mapOldTags[oldTag.Name] = oldTag
 		}
@@ -96,7 +96,7 @@ func (h *Handler) ApiInsertViaExtension(w http.ResponseWriter, r *http.Request, 
 		}
 
 		var isFatalErr bool
-		book, isFatalErr, err = core.ProcessBookmark(request)
+		book, isFatalErr, err = core.ProcessBookmark(h.dependencies, request)
 
 		if tmp, ok := contentBuffer.(io.ReadCloser); ok {
 			tmp.Close()
@@ -126,7 +126,7 @@ func (h *Handler) ApiDeleteViaExtension(w http.ResponseWriter, r *http.Request, 
 	checkError(err)
 
 	// Decode request
-	request := model.Bookmark{}
+	request := model.BookmarkDTO{}
 	err = json.NewDecoder(r.Body).Decode(&request)
 	checkError(err)
 

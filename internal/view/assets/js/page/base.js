@@ -1,3 +1,5 @@
+import { apiRequest } from "../utils/api.js";
+
 export default {
 	props: {
 		activeAccount: {
@@ -7,43 +9,41 @@ export default {
 					id: 0,
 					username: "",
 					owner: false,
-				}
-			}
+				};
+			},
 		},
 		appOptions: {
 			type: Object,
 			default() {
 				return {
-					showId: false,
-					listMode: false,
-					nightMode: false,
-					hideThumbnail: false,
-					hideExcerpt: false,
-
-					keepMetadata: false,
-					useArchive: false,
-					createEbook: false,
-					makePublic: false,
+					ShowId: false,
+					ListMode: false,
+					HideThumbnail: false,
+					HideExcerpt: false,
+					KeepMetadata: false,
+					UseArchive: false,
+					CreateEbook: false,
+					MakePublic: false,
 				};
-			}
-		}
+			},
+		},
 	},
 	data() {
 		return {
-			dialog: {}
-		}
+			dialog: {},
+		};
 	},
 	methods: {
 		defaultDialog() {
 			return {
 				visible: false,
 				loading: false,
-				title: '',
-				content: '',
+				title: "",
+				content: "",
 				fields: [],
 				showLabel: false,
-				mainText: 'Yes',
-				secondText: '',
+				mainText: "Yes",
+				secondText: "",
 				mainClick: () => {
 					this.dialog.visible = false;
 				},
@@ -52,23 +52,14 @@ export default {
 				},
 				escPressed: () => {
 					if (!this.loading) this.dialog.visible = false;
-				}
-			}
+				},
+			};
 		},
-		showDialog(cfg) {
-			var base = this.defaultDialog();
-			base.visible = true;
-			if (cfg.loading) base.loading = cfg.loading;
-			if (cfg.title) base.title = cfg.title;
-			if (cfg.content) base.content = cfg.content;
-			if (cfg.fields) base.fields = cfg.fields;
-			if (cfg.showLabel) base.showLabel = cfg.showLabel;
-			if (cfg.mainText) base.mainText = cfg.mainText;
-			if (cfg.secondText) base.secondText = cfg.secondText;
-			if (cfg.mainClick) base.mainClick = cfg.mainClick;
-			if (cfg.secondClick) base.secondClick = cfg.secondClick;
-			if (cfg.escPressed) base.escPressed = cfg.escPressed;
-			this.dialog = base;
+		showDialog(opt) {
+			this.dialog = {
+				visible: true,
+				...opt,
+			};
 		},
 		async getErrorMessage(err) {
 			switch (err.constructor) {
@@ -76,40 +67,92 @@ export default {
 					return err.message;
 				case Response:
 					var text = await err.text();
+
+					// Handle new error messages
+					if (text[0] == "{") {
+						var json = JSON.parse(text);
+						return json.error;
+					}
+
 					return `${text} (${err.status})`;
 				default:
 					return err;
 			}
 		},
 		isSessionError(err) {
-			switch (err.toString().replace(/\(\d+\)/g, "").trim().toLowerCase()) {
+			switch (
+				err
+					.toString()
+					.replace(/\(\d+\)/g, "")
+					.trim()
+					.toLowerCase()
+			) {
 				case "session is not exist":
 				case "session has been expired":
-					return true
+					return true;
 				default:
 					return false;
 			}
 		},
+		themeSwitch(theme) {
+			switch (theme) {
+				case "light":
+					document.body.classList.remove("dark");
+					document.body.classList.add("light");
+					break;
+				case "dark":
+					document.body.classList.remove("light");
+					document.body.classList.add("dark");
+					break;
+				case "follow":
+					document.body.classList.remove("light", "dark");
+					break;
+				default:
+					console.error("Invalid theme selected");
+			}
+		},
 		showErrorDialog(msg) {
-			var sessionError = this.isSessionError(msg),
-				dialogContent = sessionError ? "Session has expired, please login again." : msg;
-
 			this.showDialog({
-				visible: true,
-				title: 'Error',
-				content: dialogContent,
-				mainText: 'OK',
+				title: "Error",
+				content: msg,
+				mainText: "OK",
 				mainClick: () => {
 					this.dialog.visible = false;
-					if (sessionError) {
-						var loginUrl = new Url("login", document.baseURI);
-						loginUrl.query.dst = window.location.href;
-
-						document.cookie = `session-id=; Path=${new URL(document.baseURI).pathname}; Expires=Thu, 01 Jan 1970 00:00:00 GMT;`;
-						location.href = loginUrl.toString();
-					}
-				}
+				},
+				escPressed: () => {
+					this.dialog.visible = false;
+				},
 			});
 		},
-	}
-}
+		async saveSetting(key, value) {
+			try {
+				await apiRequest(new URL("api/v1/settings", document.baseURI), {
+					method: "PUT",
+					body: JSON.stringify({ [key]: value }),
+				});
+			} catch (err) {
+				this.showErrorDialog(err.message);
+			}
+		},
+		async logout() {
+			try {
+				await apiRequest(new URL("api/v1/auth/logout", document.baseURI), {
+					method: "POST",
+				});
+
+				// Clear session data
+				document.cookie = `token=; Path=${
+					new URL(document.baseURI).pathname
+				}; Expires=Thu, 01 Jan 1970 00:00:00 GMT;`;
+
+				localStorage.removeItem("shiori-account");
+				localStorage.removeItem("shiori-token");
+
+				// Reload page
+				window.location.reload();
+			} catch (err) {
+				this.showErrorDialog(err.message);
+			}
+		},
+	},
+};

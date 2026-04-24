@@ -52,7 +52,7 @@ func importHandler(cmd *cobra.Command, args []string) {
 	defer srcFile.Close()
 
 	// Parse bookmark's file
-	bookmarks := []model.Bookmark{}
+	bookmarks := []model.BookmarkDTO{}
 	mapURL := make(map[string]struct{})
 
 	doc, err := goquery.NewDocumentFromReader(srcFile)
@@ -106,7 +106,7 @@ func importHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		_, exist, err := deps.Database.GetBookmark(cmd.Context(), 0, url)
+		_, exist, err := deps.Database().GetBookmark(cmd.Context(), 0, url)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			cError.Printf("Skip %s: Get Bookmark fail, %v", url, err)
 			return
@@ -119,11 +119,13 @@ func importHandler(cmd *cobra.Command, args []string) {
 		}
 
 		// Get bookmark tags
-		tags := []model.Tag{}
+		tags := []model.TagDTO{}
 		for _, strTag := range strings.Split(strTags, ",") {
 			strTag = normalizeSpace(strTag)
 			if strTag != "" {
-				tags = append(tags, model.Tag{Name: strTag})
+				tags = append(tags, model.TagDTO{
+					Tag: model.Tag{Name: strTag},
+				})
 			}
 		}
 
@@ -131,15 +133,17 @@ func importHandler(cmd *cobra.Command, args []string) {
 		// and add it as tags (if necessary)
 		category := normalizeSpace(h3.Text())
 		if category != "" && generateTag {
-			tags = append(tags, model.Tag{Name: category})
+			tags = append(tags, model.TagDTO{
+				Tag: model.Tag{Name: category},
+			})
 		}
 
 		// Add item to list
-		bookmark := model.Bookmark{
-			URL:      url,
-			Title:    title,
-			Tags:     tags,
-			Modified: modifiedDate.Format(model.DatabaseDateFormat),
+		bookmark := model.BookmarkDTO{
+			URL:        url,
+			Title:      title,
+			Tags:       tags,
+			ModifiedAt: modifiedDate.Format(model.DatabaseDateFormat),
 		}
 
 		mapURL[url] = struct{}{}
@@ -147,7 +151,7 @@ func importHandler(cmd *cobra.Command, args []string) {
 	})
 
 	// Save bookmark to database
-	bookmarks, err = deps.Database.SaveBookmarks(cmd.Context(), true, bookmarks...)
+	bookmarks, err = deps.Database().SaveBookmarks(cmd.Context(), true, bookmarks...)
 	if err != nil {
 		cError.Printf("Failed to save bookmarks: %v\n", err)
 		os.Exit(1)

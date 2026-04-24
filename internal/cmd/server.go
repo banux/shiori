@@ -4,9 +4,11 @@ import (
 	"context"
 	"strings"
 
+	"github.com/go-shiori/shiori/internal/config"
 	"github.com/go-shiori/shiori/internal/http"
 	"github.com/go-shiori/shiori/internal/model"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func newServerCommand() *cobra.Command {
@@ -22,9 +24,16 @@ func newServerCommand() *cobra.Command {
 	cmd.Flags().StringP("webroot", "r", "/", "Root path that used by server")
 	cmd.Flags().Bool("access-log", false, "Print out a non-standard access log")
 	cmd.Flags().Bool("serve-web-ui", true, "Serve static files from the webroot path")
+	cmd.Flags().Bool("experimental-serve-web-ui-v2", false, "Serve static files from the webapp path")
 	cmd.Flags().String("secret-key", "", "Secret key used for encrypting session data")
 
 	return cmd
+}
+
+func setIfFlagChanged(flagName string, flags *pflag.FlagSet, cfg *config.Config, fn func(cfg *config.Config)) {
+	if flags.Changed(flagName) {
+		fn(cfg)
+	}
 }
 
 func newServerCommandHandler() func(cmd *cobra.Command, args []string) {
@@ -37,11 +46,10 @@ func newServerCommandHandler() func(cmd *cobra.Command, args []string) {
 		rootPath, _ := cmd.Flags().GetString("webroot")
 		accessLog, _ := cmd.Flags().GetBool("access-log")
 		serveWebUI, _ := cmd.Flags().GetBool("serve-web-ui")
-		secretKey, _ := cmd.Flags().GetString("secret-key")
+		serveWebUIV2, _ := cmd.Flags().GetBool("experimental-serve-web-ui-v2")
+		secretKey, _ := cmd.Flags().GetBytesHex("secret-key")
 
 		cfg, dependencies := initShiori(ctx, cmd)
-
-		cfg.Http.SetDefaults(dependencies.Log)
 
 		// Validate root path
 		if rootPath == "" {
@@ -56,22 +64,40 @@ func newServerCommandHandler() func(cmd *cobra.Command, args []string) {
 			rootPath += "/"
 		}
 
-		// Override configuration from flags
-		cfg.Http.Port = port
-		cfg.Http.Address = address + ":"
-		cfg.Http.RootPath = rootPath
-		cfg.Http.AccessLog = accessLog
-		cfg.Http.ServeWebUI = serveWebUI
-		cfg.Http.SecretKey = secretKey
+		// Override configuration from flags if needed
+		setIfFlagChanged("port", cmd.Flags(), cfg, func(cfg *config.Config) {
+			cfg.Http.Port = port
+		})
+		setIfFlagChanged("address", cmd.Flags(), cfg, func(cfg *config.Config) {
+			cfg.Http.Address = address + ":"
+		})
+		setIfFlagChanged("webroot", cmd.Flags(), cfg, func(cfg *config.Config) {
+			cfg.Http.RootPath = rootPath
+		})
+		setIfFlagChanged("access-log", cmd.Flags(), cfg, func(cfg *config.Config) {
+			cfg.Http.AccessLog = accessLog
+		})
+		setIfFlagChanged("serve-web-ui", cmd.Flags(), cfg, func(cfg *config.Config) {
+			cfg.Http.ServeWebUI = serveWebUI
+		})
+		setIfFlagChanged("secret-key", cmd.Flags(), cfg, func(cfg *config.Config) {
+			cfg.Http.SecretKey = secretKey
+		})
+		setIfFlagChanged("experimental-serve-web-ui-v2", cmd.Flags(), cfg, func(cfg *config.Config) {
+			cfg.Http.ServeWebUIV2 = serveWebUIV2
+		})
 
-		dependencies.Log.Infof("Starting Shiori v%s", model.BuildVersion)
+		dependencies.Logger().Infof("Starting Shiori v%s", model.BuildVersion)
 
-		server := http.NewHttpServer(dependencies.Log).Setup(cfg, dependencies)
+		server, err := http.NewHttpServer(dependencies.Logger()).Setup(cfg, dependencies)
+		if err != nil {
+			dependencies.Logger().WithError(err).Fatal("error setting up server")
+		}
 
 		if err := server.Start(ctx); err != nil {
-			dependencies.Log.WithError(err).Fatal("error starting server")
+			dependencies.Logger().WithError(err).Fatal("error starting server")
 		}
-		dependencies.Log.WithField("addr", address).Debug("started http server")
+		dependencies.Logger().Debug("started http server")
 
 		server.WaitStop(ctx)
 	}
